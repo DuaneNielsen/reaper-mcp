@@ -11,7 +11,15 @@ def ensure_connected() -> None:
     if _connected:
         return
     try:
-        reapy.connect()
+        # Use reconnect() rather than connect(): if reapy was imported before
+        # REAPER was up (common when this MCP server is launched as a long-lived
+        # daemon by an editor or agent harness), the import-time probe failed,
+        # CLIENTS["localhost"] is missing, and reapy.reascript_api loaded with
+        # an empty __all__. connect() with no host is a no-op in that state.
+        # reconnect() retries the probe and reloads reascript_api on success,
+        # healing the late-start case. When REAPER was already up at import,
+        # reconnect() is a cheap re-probe.
+        reapy.reconnect()
         _connected = True
         logger.info("Connected to REAPER")
     except Exception as e:
