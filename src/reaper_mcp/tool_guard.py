@@ -156,6 +156,30 @@ def _disabled_payload(name: str, reason: str) -> dict[str, Any]:
     }
 
 
+# Substrings that identify a structural failure inside a tool's error message.
+# Every tool in this codebase wraps its body in try/except Exception and returns
+# {"success": False, "error": str(e)}, so AttributeError never propagates to
+# our guard — we have to fingerprint the error string instead.
+_STRUCTURAL_ERROR_MARKERS = (
+    "has no attribute",  # 'X' object has no attribute 'y' / module 'X' has no attribute 'y'
+)
+
+
+def _looks_structurally_broken(result: Any) -> str | None:
+    """If `result` looks like a tool returning a structural failure, return
+    the error string. Otherwise return None (don't mark broken)."""
+    if not isinstance(result, dict):
+        return None
+    if result.get("success") is not False:
+        return None
+    error = result.get("error")
+    if not isinstance(error, str):
+        return None
+    if any(marker in error for marker in _STRUCTURAL_ERROR_MARKERS):
+        return error
+    return None
+
+
 def install(mcp: Any) -> None:
     """Monkey-patch mcp.tool so every subsequent @mcp.tool() registration
     is guarded. Call this once, before any register_tools() runs.
@@ -190,10 +214,20 @@ def install(mcp: Any) -> None:
             @functools.wraps(fn)
             def guarded_fn(*args: Any, **kwargs: Any) -> Any:
                 try:
-                    return fn(*args, **kwargs)
+                    result = fn(*args, **kwargs)
                 except AttributeError as e:
+                    # Path 1: AttributeError propagated out of the tool body.
+                    # Rare in this codebase since tools usually catch Exception
+                    # internally, but keep it for safety.
                     mark_broken(name, str(e))
                     return _disabled_payload(name, str(e))
+                # Path 2: tool caught its own exception and returned an error
+                # dict. Sniff for the API-drift signature.
+                structural_err = _looks_structurally_broken(result)
+                if structural_err is not None:
+                    mark_broken(name, structural_err)
+                    return _disabled_payload(name, structural_err)
+                return result
 
             return real_decorator(guarded_fn)
 
